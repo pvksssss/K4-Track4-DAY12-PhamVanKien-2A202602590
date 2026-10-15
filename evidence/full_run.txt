@@ -1,0 +1,204 @@
+
+=== STEP 0 · data: download, audit, clean =================================
+{
+  "rows": 992679,
+  "trajectories_raw": 9993,
+  "exact_duplicates_removed": 383,
+  "trajectories_clean": 9610,
+  "steps_min_median_max": [
+    70,
+    106.0,
+    109
+  ],
+  "dt_s": 0.1,
+  "gap_equals_pos_diff_minus_length": {
+    "mean_offset_m": 4.499999999999993,
+    "max_abs_dev_m": 3.638334078459593e-11
+  },
+  "acc_lead_column_corr_with_dv_dt": 0.04535359629037126,
+  "acc_follower_column_corr_with_dv_dt": 0.9290867466753292,
+  "lead_speed_quantiles_m_s_p1_p50_p99": [
+    0.3442020251325376,
+    8.063122305063752,
+    15.554903942526959
+  ],
+  "follower_speed_quantiles_m_s_p1_p50_p99": [
+    0.7520946558057985,
+    8.179941764198631,
+    17.828678407935072
+  ],
+  "gap_quantiles_m_p1_p50_p99": [
+    2.1499381741008863,
+    13.331134906963024,
+    72.82926583019832
+  ],
+  "lead_decel_smoothed_quantiles_p0.1_p1_p50": [
+    -2.769123302015074,
+    -1.950220714461102,
+    0.047499658216878515
+  ],
+  "verdict": "Acc_LV is not usable (corr with d(speed)/dt ~ 0): derive lead acceleration from smoothed Speed_LV. Duplicates exist at far-apart ids, so a naive split can leak."
+}
+student 2A202602590: split seed 7509, model seeds [9112, 9113, 9114, 9115, 9116], cruise speed 12.0 m/s
+
+=== STEP 1 · replay: write a log, replay it, compare with a tolerance =====
+  log: 600 segments, 9.5 MB (replay_log.jsonl)
+  re-run of the same code      : 0/600 segments differ, 0 not bit-identical
+  refactor (float32, reordered): 0/600 differ beyond tol, but 600 are not bit-identical (max diff 1.2e-04)
+  behaviour change (add AEB)   : 6/600 segments differ -> open them: [140, 179, 230, 450, 513]
+  'fastest' replay             : 0 late, 0 dropped frames (deadlines do not exist)
+  real-time replay             : 581 late + 570 dropped of 59524 frames; 376/600 segments change
+  (0.1+0.2)+0.3 = 0.6000000000000001   0.1+(0.2+0.3) = 0.6
+  -> evidence/replay.json
+
+=== STEP 2 · scenarios: mine the logs, build the grid, validate the simulator 
+  worked example: gap 12 m, closing 5 m/s -> TTC = 2.40 s, required decel = 1.04 m/s^2
+  mined 614 lead-braking events out of 9610 trajectories (6.4 %); peak lead decel p50 -2.5, p99 -4.2 m/s^2
+  hardest braking any logged human applied (99.9th percentile): 3.6 m/s^2; the actuator can do 9
+  grid 60 gaps x 45 closing speeds = 2700 cells; 9 % of the grid needs braking harder than any logged human ever did
+  validation t_react=0.0: full-brake collides in 2.2 % of cells, physics says 2.2 % unavoidable; mismatching cells away from the frontier: 0
+  validation t_react=0.6: full-brake collides in 7.4 % of cells, physics says 7.4 % unavoidable; mismatching cells away from the frontier: 0
+  IDM, t_react 0.0 -> 0.6 s: collision area 2.2 % -> 7.4 %
+  -> evidence/scenarios.json
+
+=== STEP 3 · open loop: score the planners by replaying held-out logs =====
+  train windows 167549, test windows 71584; 'lead brakes within 3 s' slice = 4.4 % of test windows
+  seed 9112: trained both (14 s)
+  seed 9113: trained both (29 s)
+  seed 9114: trained both (43 s)
+  seed 9115: trained both (57 s)
+  seed 9116: trained both (70 s)
+  planner      L2 all [m]   L2 brake slice
+  const-vel     1.252 ±0.000        1.887
+  IDM           1.505 ±0.000        1.544
+  EgoMLP        0.759 ±0.002        1.072
+  PercMLP       0.622 ±0.004        0.868
+  -> evidence/openloop.json
+
+=== STEP 4 · closed loop: let each planner drive against the replayed lead 
+  2883 held-out trajectories, 193 of them with a braking lead; human median min gap 9.7 m
+  const-vel  collisions: 20.3 %         (worst seed CI95 [18.8, 21.8]); on braking-lead trajectories 52.3 %
+  IDM        collisions: 0.1 %          (worst seed CI95 [0.1, 0.4]); on braking-lead trajectories 1.6 %
+  EgoMLP     collisions: 12.1..25.4 %   (worst seed CI95 [23.9, 27.0]); on braking-lead trajectories 58.0 %
+  PercMLP    collisions: 0.8..3.2 %     (worst seed CI95 [2.6, 3.9]); on braking-lead trajectories 16.6 %
+  with perception noise (gap ±1 m, lead speed ±0.5 m/s) IDM     : 0.1..0.1 %
+  with perception noise (gap ±1 m, lead speed ±0.5 m/s) PercMLP : 0.9..3.3 %
+  cut-in grid t_react=0.0: unavoidable 2.2 %; avoidable-but-collides (worst seed): const-vel 75.4 %, IDM 0.0 %, EgoMLP 75.0 %, PercMLP 15.0 %
+  cut-in grid t_react=0.6: unavoidable 7.4 %; avoidable-but-collides (worst seed): const-vel 70.2 %, IDM 0.0 %, EgoMLP 69.9 %, PercMLP 17.1 %
+
+  planner     open-loop L2   rank | closed-loop collisions   rank
+  const-vel     1.252 m    3   |         20.3 %         4
+  IDM           1.505 m    4   |          0.1 %         1
+  EgoMLP        0.759 m    2   |         19.7 %         3
+  PercMLP       0.622 m    1   |          1.4 %         2
+  pairs whose order flips between the two scorings: [('const-vel', 'IDM'), ('IDM', 'EgoMLP'), ('IDM', 'PercMLP')]
+  -> evidence/closedloop.json
+
+=== STEP 5 · reactive agents: does the verdict change when the others react? 
+  logged humans keep a median time headway of 1.86 s
+  IDM driver, realism = distance between headway distributions (lower is better): T=0.6: 0.52, T=0.8: 0.44, T=1.0: 0.38, T=1.2: 0.35, T=1.4: 0.35, T=1.6: 0.37, T=2.0: 0.58, T=2.4: 0.87
+  -> calibrated T = 1.4 s (W1 0.35); a driver that never reacts scores 0.90
+  t_react=0.0: share of the cut-in grid with ANY collision (front or rear)
+    planner      rear car replays    rear car reacts   (rear collisions: replay / react)
+    const-vel               77.6 %              77.6 %     0.0 % / 0.0 %
+    IDM                     75.3 %               2.2 %    73.0 % / 0.0 %
+    EgoMLP                  77.2 %              77.2 %     0.0 % / 0.0 %
+    PercMLP                 80.4 %              17.3 %    70.2 % / 0.0 %
+  t_react=0.6: share of the cut-in grid with ANY collision (front or rear)
+    planner      rear car replays    rear car reacts   (rear collisions: replay / react)
+    const-vel               77.6 %              77.6 %     0.0 % / 0.0 %
+    IDM                     75.7 %               7.4 %    68.3 % / 0.0 %
+    EgoMLP                  77.4 %              77.4 %     0.0 % / 0.0 %
+    PercMLP                 77.2 %              24.5 %    53.8 % / 0.0 %
+  -> evidence/agents.json
+
+=== STEP 6 · release gate =================================================
+
+  candidate const-vel: BLOCK
+    [pass] R1_replay_reproducible     rerun identical and refactor differs beyond tol in 0 segments
+    [FAIL] R2_closed_loop_logs        upper CI95 21.76 % <= baseline 0.14 % + 1.00 points: False
+    [FAIL] R3_braking_slice           52.3 % (n=193, upper 59.3 %) vs baseline 1.6 % + 5 points
+    [FAIL] R4_scenario_grid           avoidable-but-collides 70.19 % <= baseline 0.00 % + 2.00 points: False
+    [pass] R5_seed_stability          20.3 .. 20.3 % over 1 run(s)
+    [FAIL] R6_reactive_world          77.6 % of the grid vs baseline 7.4 %
+    [pass] R7_coverage                614 mined events, 2700 grid cells
+
+  candidate EgoMLP: BLOCK
+    [pass] R1_replay_reproducible     rerun identical and refactor differs beyond tol in 0 segments
+    [FAIL] R2_closed_loop_logs        upper CI95 27.05 % <= baseline 0.14 % + 1.00 points: False
+    [FAIL] R3_braking_slice           58.0 % (n=193, upper 64.8 %) vs baseline 1.6 % + 5 points
+    [FAIL] R4_scenario_grid           avoidable-but-collides 69.93 % <= baseline 0.00 % + 2.00 points: False
+    [FAIL] R5_seed_stability          12.1 .. 25.4 % over 5 run(s)
+    [FAIL] R6_reactive_world          77.4 % of the grid vs baseline 7.4 %
+    [pass] R7_coverage                614 mined events, 2700 grid cells
+
+  candidate PercMLP: BLOCK
+    [pass] R1_replay_reproducible     rerun identical and refactor differs beyond tol in 0 segments
+    [FAIL] R2_closed_loop_logs        upper CI95 3.94 % <= baseline 0.14 % + 1.00 points: False
+    [FAIL] R3_braking_slice           16.6 % (n=193, upper 22.5 %) vs baseline 1.6 % + 5 points
+    [FAIL] R4_scenario_grid           avoidable-but-collides 17.07 % <= baseline 0.00 % + 2.00 points: False
+    [FAIL] R5_seed_stability          0.8 .. 3.2 % over 5 run(s)
+    [FAIL] R6_reactive_world          24.5 % of the grid vs baseline 7.4 %
+    [pass] R7_coverage                614 mined events, 2700 grid cells
+  -> evidence/gate.json
+
+=== STEP 7 · fix and re-gate: scenario windows + learning at the states the planner visits 
+  logs 167549 windows + 197370 windows from 20000 simulated cut-ins
+  seed 9112: trained with 2 DAgger rounds, 895759 windows (88 s)
+  seed 9113: trained with 2 DAgger rounds, 896030 windows (175 s)
+  seed 9114: trained with 2 DAgger rounds, 896030 windows (263 s)
+  seed 9115: trained with 2 DAgger rounds, 895785 windows (351 s)
+  seed 9116: trained with 2 DAgger rounds, 895710 windows (438 s)
+  -> evidence/closedloop.json
+  -> evidence/agents.json
+  -> evidence/openloop.json
+
+                  PercMLP     PercMLP+
+  open-loop L2 [m]            0.622        0.822
+  collisions on logs     0.8..3.2 %   0.3..0.4 %
+  cut-in grid (0.6 s)         17.1%         1.4%
+  held-out cruise speed 20 m/s (training saw <= 16): IDM       avoidable-but-collides 0.0..0.0 % of the grid
+  held-out cruise speed 20 m/s (training saw <= 16): PercMLP   avoidable-but-collides 27.4..41.1 % of the grid
+  held-out cruise speed 20 m/s (training saw <= 16): PercMLP+  avoidable-but-collides 0.3..2.2 % of the grid
+
+=== STEP 6 · release gate =================================================
+
+  candidate const-vel: BLOCK
+    [pass] R1_replay_reproducible     rerun identical and refactor differs beyond tol in 0 segments
+    [FAIL] R2_closed_loop_logs        upper CI95 21.76 % <= baseline 0.14 % + 1.00 points: False
+    [FAIL] R3_braking_slice           52.3 % (n=193, upper 59.3 %) vs baseline 1.6 % + 5 points
+    [FAIL] R4_scenario_grid           avoidable-but-collides 70.19 % <= baseline 0.00 % + 2.00 points: False
+    [pass] R5_seed_stability          20.3 .. 20.3 % over 1 run(s)
+    [FAIL] R6_reactive_world          77.6 % of the grid vs baseline 7.4 %
+    [pass] R7_coverage                614 mined events, 2700 grid cells
+
+  candidate EgoMLP: BLOCK
+    [pass] R1_replay_reproducible     rerun identical and refactor differs beyond tol in 0 segments
+    [FAIL] R2_closed_loop_logs        upper CI95 27.05 % <= baseline 0.14 % + 1.00 points: False
+    [FAIL] R3_braking_slice           58.0 % (n=193, upper 64.8 %) vs baseline 1.6 % + 5 points
+    [FAIL] R4_scenario_grid           avoidable-but-collides 69.93 % <= baseline 0.00 % + 2.00 points: False
+    [FAIL] R5_seed_stability          12.1 .. 25.4 % over 5 run(s)
+    [FAIL] R6_reactive_world          77.4 % of the grid vs baseline 7.4 %
+    [pass] R7_coverage                614 mined events, 2700 grid cells
+
+  candidate PercMLP: BLOCK
+    [pass] R1_replay_reproducible     rerun identical and refactor differs beyond tol in 0 segments
+    [FAIL] R2_closed_loop_logs        upper CI95 3.94 % <= baseline 0.14 % + 1.00 points: False
+    [FAIL] R3_braking_slice           16.6 % (n=193, upper 22.5 %) vs baseline 1.6 % + 5 points
+    [FAIL] R4_scenario_grid           avoidable-but-collides 17.07 % <= baseline 0.00 % + 2.00 points: False
+    [FAIL] R5_seed_stability          0.8 .. 3.2 % over 5 run(s)
+    [FAIL] R6_reactive_world          24.5 % of the grid vs baseline 7.4 %
+    [pass] R7_coverage                614 mined events, 2700 grid cells
+
+  candidate PercMLP+: RELEASE
+    [pass] R1_replay_reproducible     rerun identical and refactor differs beyond tol in 0 segments
+    [pass] R2_closed_loop_logs        upper CI95 0.68 % <= baseline 0.14 % + 1.00 points: True
+    [pass] R3_braking_slice           1.6 % (n=193, upper 4.5 %) vs baseline 1.6 % + 5 points
+    [pass] R4_scenario_grid           avoidable-but-collides 1.37 % <= baseline 0.00 % + 2.00 points: True
+    [pass] R5_seed_stability          0.3 .. 0.4 % over 5 run(s)
+    [pass] R6_reactive_world          8.8 % of the grid vs baseline 7.4 %
+    [pass] R7_coverage                614 mined events, 2700 grid cells
+  -> evidence/gate.json
+  -> evidence/fix.json
+
+done in 586 s
